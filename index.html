@@ -368,7 +368,7 @@ const SPOTS = [
 ];
 const REGIONS = ['全国', ...[...new Set(SPOTS.map(s => s.region))]];
 
-const CACHE_KEY = 'surf-cache-v8';
+const CACHE_KEY = 'surf-cache-v9'; // 計算式を変えたら上げる(古い結果を残さないため)
 const CACHE_TTL = 60 * 60 * 1000; // 1時間
 const DEMO = new URLSearchParams(location.search).has('demo');
 
@@ -547,8 +547,19 @@ function processSpot(spot, m, w) {
     });
     const swellDir = (sx || sy) ? ((Math.atan2(sx, sy) * 180 / Math.PI) + 360) % 360 : null;
 
+    // 周期: うねりの向きと同じく swell波高の2乗で重み付けした平均。
+    // 単純平均だと、朝の凪いだ時間帯の短い周期に引きずられて、
+    // その日の主役になっている長周期うねりの周期を実際より短く見積もってしまう
+    let pw = 0, pwSum = 0;
+    use.forEach(i => {
+      const sh = h.swell_wave_height[i] || 0, sp = h.swell_wave_period[i];
+      if (!(sp > 0)) return;
+      const wgt = sh * sh;
+      pw += sp * wgt; pwSum += wgt;
+    });
     const periods = pick(h.swell_wave_period, use).filter(p => p > 0);
-    const period = periods.length ? periods.reduce((a, b) => a + b) / periods.length : 0;
+    const period = pwSum > 0 ? pw / pwSum
+      : periods.length ? periods.reduce((a, b) => a + b) / periods.length : 0;
     const windWaves = pick(h.wind_wave_height, use);
     const windWaveH = windWaves.length ? Math.max(...windWaves) : 0;
     const windRatio = maxH > 0 && windWaves.length
@@ -574,17 +585,29 @@ function processSpot(spot, m, w) {
     //   (実測: 2026-07-06 スーサイド 腹〜胸に対しアプリが過小 → リーフ増幅を導入)
     // - 風波(局地チョップ)は乗れるセットにならないので寄与を小さく(0.2)。
     //   これをしないと夏の西向きビーチが海風チョップでサイズ過大になる
-    const expo = dir => {
+    // - 横向きのうねりでも、周期が長いものは岬やリーフを回り込んで(屈折・回折)
+    //   正面から入ったのに近い形で届く。短い風うねりはほとんど回り込まない。
+    //   そこで減衰カーブを「短周期=急に落ちる / 長周期=緩やかに落ちる」の
+    //   2本用意し、周期(wrap)で混ぜる。正面(40度以内)はどちらも1.0で変化なし
+    //   (実測: 2026-08-11 砂辺 セット ムネ〜カタ に対しアプリが過小。
+    //    南寄りの長周期うねりが西向きの砂辺に回り込んでいたが、
+    //    向きの角度差だけで一律に切り捨てていたのが原因)
+    //   風波は周期が短く回り込まないので、こちらは常に急なカーブのまま(wrap=0)
+    const swellWrap = period >= 13 ? 1 : period >= 7 ? (period - 7) / 6 : 0;
+    const expo = (dir, wrap = 0) => {
       if (dir == null) return 0.4;
       const a = angDiff(dir, spot.facing);
-      return a <= 40 ? 1 : a <= 65 ? 0.7 : a <= 90 ? 0.35 : a <= 115 ? 0.12 : 0.03;
+      const sharp = a <= 40 ? 1 : a <= 65 ? 0.7  : a <= 90 ? 0.35 : a <= 115 ? 0.12 : 0.03;
+      if (!wrap) return sharp;
+      const soft  = a <= 40 ? 1 : a <= 65 ? 0.85 : a <= 90 ? 0.65 : a <= 115 ? 0.35 : 0.12;
+      return sharp + (soft - sharp) * wrap;
     };
     const pBoost = spot.reef
       ? (period >= 11 ? 1.5 : period >= 8 ? 1.3 : period >= 6 ? 1.0 : 0.8)
       : (period >= 11 ? 1.15 : period >= 8 ? 1 : period >= 6 ? 0.85 : 0.7);
     const effH = Math.min(
       spot.reef ? maxH * 1.6 : maxH,
-      (swellH * expo(swellDir) * pBoost + windWaveH * expo(windWaveDir) * 0.2) * (spot.cal || 1)
+      (swellH * expo(swellDir, swellWrap) * pBoost + windWaveH * expo(windWaveDir) * 0.2) * (spot.cal || 1)
     );
 
     const windAt = hours => {
