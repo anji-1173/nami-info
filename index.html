@@ -471,7 +471,7 @@ async function fetchAll(force) {
     const lats = SPOTS.map(s => s.dataLat != null ? s.dataLat : s.lat).join(',');
     const lons = SPOTS.map(s => s.dataLon != null ? s.dataLon : s.lon).join(',');
     const mUrl = `https://marine-api.open-meteo.com/v1/marine?latitude=${lats}&longitude=${lons}`
-      + `&hourly=wave_height,wave_direction,wave_period,swell_wave_height,swell_wave_direction,swell_wave_period,wind_wave_height,wind_wave_direction,sea_level_height_msl`
+      + `&hourly=wave_height,wave_direction,wave_period,swell_wave_height,swell_wave_direction,swell_wave_period,wind_wave_height,wind_wave_direction,wind_wave_period,sea_level_height_msl`
       + `&timezone=Asia%2FTokyo&forecast_days=8&cell_selection=sea`;
     const wUrl = `https://api.open-meteo.com/v1/forecast?latitude=${lats}&longitude=${lons}`
       + `&hourly=wind_speed_10m,wind_direction_10m&wind_speed_unit=ms&timezone=Asia%2FTokyo&forecast_days=8`;
@@ -576,6 +576,18 @@ function processSpot(spot, m, w) {
     });
     const windWaveDir = (wx || wy) ? ((Math.atan2(wx, wy) * 180 / Math.PI) + 360) % 360 : null;
 
+    // 風波の周期(波高2乗重み付き平均)。台風が作った波と、その場の海風チョップを
+    // 見分けるのに使う。API がこの項目を返さない場合は null(従来の扱いに戻す)
+    let ww = 0, wwSum = 0;
+    use.forEach(i => {
+      const wp = h.wind_wave_period ? h.wind_wave_period[i] : null;
+      const wwh = h.wind_wave_height[i] || 0;
+      if (!(wp > 0)) return;
+      const wgt = wwh * wwh;
+      ww += wp * wgt; wwSum += wgt;
+    });
+    const windWavePeriod = wwSum > 0 ? ww / wwSum : null;
+
     // ブレイクサイズ推定(effH):
     // - ポイントに届く向きのうねりだけを数える(ビーチの向きとの一致度で減衰。
     //   横〜裏向きは島や地形に遮られるため急に減衰させる)
@@ -583,8 +595,12 @@ function processSpot(spot, m, w) {
     //   うねりが掘れて沖合波高より大きくブレイクするため増幅を強くし、
     //   上限も沖合波高の1.6倍まで許容する
     //   (実測: 2026-07-06 スーサイド 腹〜胸に対しアプリが過小 → リーフ増幅を導入)
-    // - 風波(局地チョップ)は乗れるセットにならないので寄与を小さく(0.2)。
-    //   これをしないと夏の西向きビーチが海風チョップでサイズ過大になる
+    // - 風波は「乗れないチョップ」とは限らない。台風が近くにあると、その風が
+    //   作った波は風波に分類されたまま届くことがあり(2026-08-11 砂辺: 台風13号が
+    //   東シナ海にあり西海岸は胸肩のセット。しかしアプリはフラット表示)、
+    //   これを一律 0.2 に割り引くと台風の波をまるごと捨ててしまう。
+    //   見分けるのは周期: その場の海風チョップは3〜5秒、台風の波は8秒以上ある。
+    //   周期が短いものだけ強く割り引く(夏の西向きビーチが海風で過大になるのを防ぐ)
     // - 横向きのうねりでも、周期が長いものは岬やリーフを回り込んで(屈折・回折)
     //   正面から入ったのに近い形で届く。短い風うねりはほとんど回り込まない。
     //   そこで減衰カーブを「短周期=急に落ちる / 長周期=緩やかに落ちる」の
@@ -605,12 +621,23 @@ function processSpot(spot, m, w) {
       const soft  = a <= 40 ? 1 : a <= 65 ? 0.85 : a <= 90 ? 0.65 : a <= 115 ? 0.25 : 0.03;
       return sharp + (soft - sharp) * wrap;
     };
-    const pBoost = spot.reef
-      ? (period >= 11 ? 1.5 : period >= 8 ? 1.3 : period >= 6 ? 1.0 : 0.8)
-      : (period >= 11 ? 1.15 : period >= 8 ? 1 : period >= 6 ? 0.85 : 0.7);
+    const pBoostOf = p => spot.reef
+      ? (p >= 11 ? 1.5 : p >= 8 ? 1.3 : p >= 6 ? 1.0 : 0.8)
+      : (p >= 11 ? 1.15 : p >= 8 ? 1 : p >= 6 ? 0.85 : 0.7);
+    const pBoost = pBoostOf(period);
+    const wrapOf = p => p >= 13 ? 1 : p >= 7 ? (p - 7) / 6 : 0;
+
+    // 風波の「乗れる度合い」。周期が取れない古いデータでは従来どおり一律 0.2
+    const wwRide = windWavePeriod == null ? 0.2
+      : windWavePeriod < 5 ? 0.15 : windWavePeriod < 7 ? 0.3
+      : windWavePeriod < 9 ? 0.6 : windWavePeriod < 11 ? 0.85 : 1.0;
+    const windTerm = windWavePeriod == null
+      ? windWaveH * expo(windWaveDir) * 0.2
+      : windWaveH * expo(windWaveDir, wrapOf(windWavePeriod)) * pBoostOf(windWavePeriod) * wwRide;
+
     const effH = Math.min(
       spot.reef ? maxH * 1.6 : maxH,
-      (swellH * expo(swellDir, swellWrap) * pBoost + windWaveH * expo(windWaveDir) * 0.2) * (spot.cal || 1)
+      (swellH * expo(swellDir, swellWrap) * pBoost + windTerm) * (spot.cal || 1)
     );
 
     const windAt = hours => {
@@ -642,10 +669,14 @@ function processSpot(spot, m, w) {
 
   // うねり急上昇の検出: 前日比+0.6m以上かつうねり1.0m以上、または周期12秒以上の長周期うねり
   // (台風・遠方の低気圧からのうねりが波浪モデルに現れたサイン)
+  // 台風の波が「風波」に分類されて届く日は swellH が伸びないので、
+  // うねりの高さだけを見ていると急上昇を見逃す。ブレイク推定(effH)の
+  // 立ち上がりも判定に加える
   daily = daily.map((d, i) => ({
     ...d,
     surge: (i > 0 && d.swellH - daily[i - 1].swellH >= 0.6 && d.swellH >= 1.0)
-      || (d.period >= 12 && d.swellH >= 0.8),
+      || (d.period >= 12 && d.swellH >= 0.8)
+      || (i > 0 && d.effH - daily[i - 1].effH >= 0.5 && d.effH >= 1.0),
   }));
 
   // 詳細表示用: 3時間ごとの生データ
@@ -730,6 +761,8 @@ function demoData() {
       swell_wave_period: mk(i => 8 + 3 * Math.sin(i / 40 + seed)),
       wind_wave_height: wave.map(v => v * 0.3),
       wind_wave_direction: mk(i => (s.facing + 30 * Math.sin(i / 11 + seed) + 360) % 360),
+      wind_wave_period: mk(i => 4.5 + 1.5 * Math.sin(i / 9 + seed)), // 海風チョップ相当の短い周期
+
       sea_level_height_msl: mk(i => 0.8 * Math.sin(2 * Math.PI * (i % 24) / 12.42 + seed) + 0.3 * Math.sin(2 * Math.PI * (i % 24) / 25 + seed)),
     }});
     wind.push({ hourly: {
