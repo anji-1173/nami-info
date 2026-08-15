@@ -320,7 +320,8 @@ function shiftTideSeries(values, offsetMin) {
 /* ===== スポット定義 =====
    facing: ビーチが海に向いている方角（度）。オフショア判定に使用
    lbl: 地図上のラベル位置 r=右 l=左 t=上 b=下
-   tide: 潮位参照点(TIDE_STATIONS)のキー。沖縄本島は那覇基準 */
+   tide: 潮位参照点(TIDE_STATIONS)のキー。沖縄本島は那覇基準
+   cal: そのポイントだけのサイズ補正倍率(実測とのズレを埋める。未指定=1.0) */
 const SPOTS = [
   // 北海道・東北
   { id:'itanki',    name:'イタンキ浜',    pref:'室蘭',   region:'北海道・東北', lat:42.32, lon:141.04, facing:140, lbl:'l' },
@@ -358,7 +359,9 @@ const SPOTS = [
   // 沖縄
   { id:'mizugama',  name:'水釜',          pref:'嘉手納', region:'沖縄',        lat:26.352,lon:127.735,facing:270, lbl:'t', mapDy:-3, dataLat:26.36, dataLon:127.68, tide:'naha', reef:true },
   { id:'sunabe',    name:'砂辺',          pref:'北谷',   region:'沖縄',        lat:26.335,lon:127.74, facing:280, lbl:'r', mapDy:3, dataLat:26.33, dataLon:127.68, tide:'naha', reef:true },
-  { id:'suicide',   name:'スーサイド（米須）', pref:'糸満', region:'沖縄',     lat:26.08, lon:127.71, facing:190, lbl:'b', dataLat:26.03, dataLon:127.70, tide:'naha', reef:true },
+  // cal:1.5 — 実測2回とも過小だったため(2026-07-06 腹〜胸 / 2026-08-15 セット胸肩に対し
+  // アプリはコシ〜ハラ0.9m)。浅いリーフでうねりが掘れる度合いが一般のリーフ増幅より強い
+  { id:'suicide',   name:'スーサイド（米須）', pref:'糸満', region:'沖縄',     lat:26.08, lon:127.71, facing:190, lbl:'b', dataLat:26.03, dataLon:127.70, tide:'naha', reef:true, cal:1.5 },
   // 日本海
   { id:'yunohama',  name:'湯野浜',        pref:'山形',   region:'日本海',      lat:38.77, lon:139.73, facing:290, lbl:'t' },
   { id:'sekiyahama',name:'関屋浜',        pref:'新潟',   region:'日本海',      lat:37.93, lon:139.02, facing:325, lbl:'t' },
