@@ -291,7 +291,7 @@
 
 /* ビルド版数(更新のたびに増やす)。ページ自身を取得して比較し、
    ホーム画面アプリ等でキャッシュされていても新版を検知する */
-const APP_VERSION = '2026-09-08.1';
+const APP_VERSION = '2026-09-08.2';
 
 /* 潮位参照点: 検潮所に相当する沖合の海上点。スポットに tide:'naha' のように
    指定すると、波データの取得点とは別にこの点の潮位を使う。
@@ -462,7 +462,9 @@ async function fetchAll(force) {
   if (!force && !DEMO) {
     try {
       const c = JSON.parse(localStorage.getItem(CACHE_KEY));
-      if (c && Date.now() - c.fetchedAt < CACHE_TTL) return c;
+      // キャッシュには計算済みのサイズが入っている。計算式を変えた版では作り直す
+      // (これがないと、新版を配ってもキャッシュが切れるまで古いサイズが出続ける)
+      if (c && c.appVersion === APP_VERSION && Date.now() - c.fetchedAt < CACHE_TTL) return c;
     } catch (e) { /* 壊れたキャッシュは無視 */ }
   }
   let marine, wind, tideMap = {};
@@ -503,7 +505,7 @@ async function fetchAll(force) {
       });
     } // 取得失敗時はスポット直近の潮位にフォールバック
   }
-  const data = { fetchedAt: Date.now(), spots: {} };
+  const data = { fetchedAt: Date.now(), appVersion: APP_VERSION, spots: {} };
   SPOTS.forEach((spot, i) => {
     if (spot.tide && tideMap[spot.tide]) {
       marine[i].hourly.sea_level_height_msl = tideMap[spot.tide];
