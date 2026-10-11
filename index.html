@@ -34,8 +34,9 @@
     --wave-fill: rgba(42,120,214,.14);
     --land: #e9e7e1;
     --shadow: 0 1px 3px rgba(0,0,0,.08);
-    /* サイズ帯: アタマ未満は青3段階+フラットはグレー、アタマ級からは警戒色(アンバー→赤) */
-    --sz0: #b9b7b0; --sz1: #86b6ef; --sz2: #3987e5; --sz3: #1c5cab;
+    /* サイズ帯: アタマ未満は青4段階+フラットはグレー、アタマ級からは警戒色(アンバー→赤)
+       sz2a(コシ〜ハラ)は sz1 と sz2 の中間色 */
+    --sz0: #b9b7b0; --sz1: #86b6ef; --sz2a: #5f9eea; --sz2: #3987e5; --sz3: #1c5cab;
     --sz4: #eda100; --sz5: #d03b3b;
     --dot-stroke: rgba(28,30,33,.45);
   }
@@ -63,7 +64,7 @@
       --wave-fill: rgba(57,135,229,.20);
       --land: #2a2d33;
       --shadow: 0 1px 3px rgba(0,0,0,.4);
-      --sz0: #5b5a54; --sz1: #9ec5f4; --sz2: #5598e7; --sz3: #2a78d6;
+      --sz0: #5b5a54; --sz1: #9ec5f4; --sz2a: #79aeed; --sz2: #5598e7; --sz3: #2a78d6;
       --sz4: #c98500; --sz5: #e66767;
       --dot-stroke: rgba(232,234,237,.5);
     }
@@ -261,7 +262,8 @@
       <span class="k">●の色 = 選択日のサイズ:</span>
       <span><i style="background:var(--sz0)"></i>〜スネ</span>
       <span><i style="background:var(--sz1)"></i>ヒザ〜コシ</span>
-      <span><i style="background:var(--sz2)"></i>コシ〜ムネ</span>
+      <span><i style="background:var(--sz2a)"></i>コシ〜ハラ</span>
+      <span><i style="background:var(--sz2)"></i>ハラ〜ムネ</span>
       <span><i style="background:var(--sz3)"></i>ムネ〜カタ</span>
       <span><i style="background:var(--sz4)"></i>アタマ級（上級者）</span>
       <span><i style="background:var(--sz5)"></i>ダブル級〜（プロ級）</span>
@@ -291,7 +293,7 @@
 
 /* ビルド版数(更新のたびに増やす)。ページ自身を取得して比較し、
    ホーム画面アプリ等でキャッシュされていても新版を検知する */
-const APP_VERSION = '2026-10-11.2';
+const APP_VERSION = '2026-10-11.3';
 
 /* 潮位参照点: 検潮所に相当する沖合の海上点。スポットに tide:'naha' のように
    指定すると、波データの取得点とは別にこの点の潮位を使う。
@@ -407,7 +409,8 @@ function sizeLabel(h) {
 function sizeColorVar(h) {
   if (h < 0.3) return '--sz0';   // フラット〜スネ
   if (h < 0.7) return '--sz1';   // ヒザ〜コシ
-  if (h < 1.1) return '--sz2';   // コシ〜ムネ
+  if (h < 0.9) return '--sz2a';  // コシ〜ハラ
+  if (h < 1.1) return '--sz2';   // ハラ〜ムネ
   if (h < 1.5) return '--sz3';   // ムネ〜カタ
   if (h < 2.3) return '--sz4';   // アタマ級(上級者)
   return '--sz5';                // ダブル級〜(プロ級・クローズ注意)
