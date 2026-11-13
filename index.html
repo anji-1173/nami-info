@@ -293,7 +293,7 @@
 
 /* ビルド版数(更新のたびに増やす)。ページ自身を取得して比較し、
    ホーム画面アプリ等でキャッシュされていても新版を検知する */
-const APP_VERSION = '2026-10-11.3';
+const APP_VERSION = '2026-11-13.1';
 
 /* 潮位参照点: 検潮所に相当する沖合の海上点。スポットに tide:'naha' のように
    指定すると、波データの取得点とは別にこの点の潮位を使う。
@@ -461,14 +461,38 @@ function condition(h, period, windQ, windSpeed) {
 }
 
 /* ===== データ取得 ===== */
+const FETCH_TIMEOUT = 20 * 1000;       // 返事をこれ以上は待たない
+const WINDLESS_TTL = 10 * 60 * 1000;   // 風なしで取れたデータは早めに取り直す
+
+function readCache() {
+  try { return JSON.parse(localStorage.getItem(CACHE_KEY)); } catch (e) { return null; }
+}
+
+/* 返事が来なければ ms ミリ秒であきらめる fetch(必ず配列で返す)。
+   以前は待ち時間の上限がなく、窓口が1つ応答しないだけで「読み込み中」のまま
+   永遠に止まっていた(実例: 2026-11-13 風の窓口が応答せず全ポイント表示不能) */
+async function fetchJson(url, ms) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), ms);
+  try {
+    const res = await fetch(url, { signal: ctl.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const j = await res.json();
+    return Array.isArray(j) ? j : [j];
+  } catch (e) {
+    throw new Error(e && e.name === 'AbortError' ? `${ms / 1000}秒待っても返事なし` : (e && e.message) || String(e));
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function fetchAll(force) {
   if (!force && !DEMO) {
-    try {
-      const c = JSON.parse(localStorage.getItem(CACHE_KEY));
-      // キャッシュには計算済みのサイズが入っている。計算式を変えた版では作り直す
-      // (これがないと、新版を配ってもキャッシュが切れるまで古いサイズが出続ける)
-      if (c && c.appVersion === APP_VERSION && Date.now() - c.fetchedAt < CACHE_TTL) return c;
-    } catch (e) { /* 壊れたキャッシュは無視 */ }
+    const c = readCache();
+    // キャッシュには計算済みのサイズが入っている。計算式を変えた版では作り直す
+    // (これがないと、新版を配ってもキャッシュが切れるまで古いサイズが出続ける)
+    const ttl = c && c.windMissing ? WINDLESS_TTL : CACHE_TTL;
+    if (c && c.appVersion === APP_VERSION && Date.now() - c.fetchedAt < ttl) return c;
   }
   let marine, wind, tideMap = {};
   if (DEMO) {
@@ -490,17 +514,18 @@ async function fetchAll(force) {
         + `&longitude=${stKeys.map(k => TIDE_STATIONS[k].lon).join(',')}`
         + `&hourly=sea_level_height_msl&timezone=Asia%2FTokyo&forecast_days=8&cell_selection=sea`
       : null;
-    const [mRes, wRes, tRes] = await Promise.all([
-      fetch(mUrl), fetch(wUrl), tUrl ? fetch(tUrl) : Promise.resolve(null),
+    // 3つを同時に頼むが、全部そろうのは待たない。必須は波だけ。
+    // 風が来なくてもサイズは波だけで出せるので、風なしで表示する
+    const [mR, wR, tR] = await Promise.allSettled([
+      fetchJson(mUrl, FETCH_TIMEOUT),
+      fetchJson(wUrl, FETCH_TIMEOUT),
+      tUrl ? fetchJson(tUrl, FETCH_TIMEOUT) : Promise.resolve(null),
     ]);
-    if (!mRes.ok || !wRes.ok) throw new Error(`API error (marine:${mRes.status} wind:${wRes.status})`);
-    marine = await mRes.json();
-    wind = await wRes.json();
-    if (!Array.isArray(marine)) marine = [marine];
-    if (!Array.isArray(wind)) wind = [wind];
-    if (tRes && tRes.ok) {
-      let t = await tRes.json();
-      if (!Array.isArray(t)) t = [t];
+    if (mR.status !== 'fulfilled') throw new Error(`波データ: ${mR.reason.message}`);
+    marine = mR.value;
+    wind = wR.status === 'fulfilled' ? wR.value : null;
+    if (tR.status === 'fulfilled' && tR.value) {
+      const t = tR.value;
       stKeys.forEach((k, i) => {
         if (t[i] && t[i].hourly) {
           tideMap[k] = shiftTideSeries(t[i].hourly.sea_level_height_msl, TIDE_STATIONS[k].offsetMin);
@@ -508,12 +533,12 @@ async function fetchAll(force) {
       });
     } // 取得失敗時はスポット直近の潮位にフォールバック
   }
-  const data = { fetchedAt: Date.now(), appVersion: APP_VERSION, spots: {} };
+  const data = { fetchedAt: Date.now(), appVersion: APP_VERSION, windMissing: !wind, spots: {} };
   SPOTS.forEach((spot, i) => {
     if (spot.tide && tideMap[spot.tide]) {
       marine[i].hourly.sea_level_height_msl = tideMap[spot.tide];
     }
-    data.spots[spot.id] = processSpot(spot, marine[i], wind[i]);
+    data.spots[spot.id] = processSpot(spot, marine[i], wind ? wind[i] : null);
   });
   if (!DEMO) {
     try { localStorage.setItem(CACHE_KEY, JSON.stringify(data)); } catch (e) { /* 容量超過時は諦める */ }
@@ -538,7 +563,7 @@ const EXPO_PTS = [[0, 1], [40, 1], [65, 0.70], [85, 0.63], [100, 0.27], [110, 0.
 /* 1スポット分の時系列を日別サマリーに変換 */
 function processSpot(spot, m, w) {
   const h = m.hourly;
-  const wh = w.hourly;
+  const wh = w && w.hourly ? w.hourly : null;   // 風が取れなかった日は null(風の欄は「—」)
   const dates = [...new Set(h.time.map(t => t.slice(0, 10)))].slice(0, 8);
   const idxByDate = {};
   h.time.forEach((t, i) => {
@@ -630,6 +655,7 @@ function processSpot(spot, m, w) {
     );
 
     const windAt = hours => {
+      if (!wh) return null;
       const sel = idx.filter(i => { const hr = +h.time[i].slice(11, 13); return hours.includes(hr); });
       if (!sel.length) return null;
       const sp = sel.map(i => wh.wind_speed_10m[i]).filter(v => v != null);
@@ -674,8 +700,8 @@ function processSpot(spot, m, w) {
         height: h.wave_height[i],
         dir: h.swell_wave_direction[i],
         period: h.swell_wave_period[i],
-        windSp: wh.wind_speed_10m[i],
-        windDir: wh.wind_direction_10m[i],
+        windSp: wh ? wh.wind_speed_10m[i] : null,
+        windDir: wh ? wh.wind_direction_10m[i] : null,
         sea: h.sea_level_height_msl ? h.sea_level_height_msl[i] : null,
       }));
     // 潮位カーブ用: 毎時
@@ -1155,7 +1181,16 @@ function renderUpdated() {
   const el = document.getElementById('updated');
   if (!state.data) { el.textContent = ''; return; }
   const t = new Date(state.data.fetchedAt);
-  el.textContent = `${DEMO ? '【デモデータ】' : ''}${t.getMonth() + 1}/${t.getDate()} ${pad2(t.getHours())}:${pad2(t.getMinutes())} 取得・v${APP_VERSION}`;
+  const notes = [];
+  if (state.staleReason) {
+    const mins = Math.max(1, Math.round((Date.now() - state.data.fetchedAt) / 60000));
+    const ago = mins < 60 ? `${mins}分` : mins < 48 * 60 ? `${Math.round(mins / 60)}時間` : `${Math.round(mins / 1440)}日`;
+    notes.push(`⚠ 最新を取得できず、${ago}前のデータを表示中`);
+  }
+  if (state.data.windMissing) notes.push('⚠ 風データを取得できず(風の欄は —)');
+  el.textContent = `${DEMO ? '【デモデータ】' : ''}${t.getMonth() + 1}/${t.getDate()} ${pad2(t.getHours())}:${pad2(t.getMinutes())} 取得・v${APP_VERSION}`
+    + (notes.length ? `\n${notes.join('\n')}` : '');
+  el.style.whiteSpace = notes.length ? 'pre-line' : '';
 }
 
 function renderError(err) {
@@ -1172,9 +1207,23 @@ async function load(force) {
   document.getElementById('content').innerHTML = '<div class="loading">読み込み中…</div>';
   try {
     state.data = await fetchAll(force);
+    state.staleReason = null;
     renderUpdated();
     render();
   } catch (err) {
+    // 波データまで取れないときは、真っ白にせず前回のデータを「○時間前」と添えて出す
+    const stale = DEMO ? null : readCache();
+    if (stale && stale.spots) {
+      try {
+        state.data = stale;
+        state.staleReason = err.message || String(err);
+        renderUpdated();
+        render();
+        return;
+      } catch (e) { /* 古い版の形式で描けなければエラー表示へ */ }
+    }
+    state.data = null;
+    renderUpdated();
     renderError(err);
   }
 }
@@ -1206,7 +1255,9 @@ document.getElementById('reloadBtn').addEventListener('click', () => {
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
   checkForUpdate();
-  if (state.data && Date.now() - state.data.fetchedAt > CACHE_TTL) load(false);
+  // 前回が不完全(古いデータ・風なし)なら早めに取り直す
+  const ttl = state.staleReason || (state.data && state.data.windMissing) ? WINDLESS_TTL : CACHE_TTL;
+  if (!state.data || Date.now() - state.data.fetchedAt > ttl) load(false);
 });
 
 /* Service Worker: ネットワーク優先キャッシュ。オンラインなら常に最新版を配信 */
